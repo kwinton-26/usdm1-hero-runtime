@@ -1,4 +1,4 @@
-// M1 Hero runtime v1.1.2
+// M1 Hero runtime v1.2.0
 // Renders USDM1 hairline hero art with WebGL. Shared by the generator and the Webflow embed.
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js';
 
@@ -26,12 +26,17 @@ class Pen {
   constructor() {
     // nb: each vertex's neighbor along its path (previous point for a segment start, next point for its end),
     // or the vertex itself at a free end. Wide strokes use it to miter the joins. c0: first vertex of the current path.
-    this.L = { pos: new Float32Array(3 * 16384), a: new Float32Array(16384), nb: new Float32Array(3 * 16384), n: 0, c0: 0 };
+    this.L = { pos: new Float32Array(3 * 16384), a: new Float32Array(16384), nb: new Float32Array(3 * 16384), e: new Int32Array(16384), n: 0, c0: 0 };
+    // e: which shape each vertex belongs to, as id * 2 + (1 for every other shape), or -1 for lines that never take
+    // the stroke gradient (grid, rules, moving light). Concepts set it with el() before drawing each shape.
+    this.cur = -1; this.lo = new Float64Array(256); this.hi = new Float64Array(256);
     this.P = { pos: new Float32Array(3 * 1024), a: new Float32Array(1024), s: new Float32Array(1024), n: 0 };
     this.o = { x: 0, y: 0, z: 0, a: 1 };
     this.grewL = this.grewP = false;
   }
-  reset() { this.L.n = 0; this.L.c0 = 0; this.P.n = 0; }
+  reset() { this.L.n = 0; this.L.c0 = 0; this.P.n = 0; this.cur = -1; }
+  // Start a shape: id groups its lines (the gradient spans the shape's own extent), odd marks every other shape.
+  el(id, odd = id & 1) { this.cur = id < 0 ? -1 : id * 2 + (odd ? 1 : 0); }
   _growL(k) {
     const L = this.L;
     if (L.n + k <= L.a.length) return;
@@ -39,6 +44,7 @@ class Pen {
     const p = new Float32Array(c * 3); p.set(L.pos); L.pos = p;
     const a = new Float32Array(c); a.set(L.a); L.a = a;
     const nb = new Float32Array(c * 3); nb.set(L.nb); L.nb = nb;
+    const e = new Int32Array(c); e.set(L.e); L.e = e;
     this.grewL = true;
   }
   seg(x1, y1, z1, a1, x2, y2, z2, a2) {
@@ -60,7 +66,34 @@ class Pen {
       N[i + 3] = P[c + 3]; N[i + 4] = P[c + 4]; N[i + 5] = P[c + 5];
       N[c] = x1; N[c + 1] = y1; N[c + 2] = z1;
     }
-    L.a[L.n] = a1; L.a[L.n + 1] = a2; L.n += 2;
+    L.a[L.n] = a1; L.a[L.n + 1] = a2; L.e[L.n] = L.e[L.n + 1] = this.cur; L.n += 2;
+  }
+  // Stroke fill. mode 1: every shape fades from full strength to clear across its own extent, toward angle ang
+  // (radians, 0 = right, counterclockwise), reaching clear at reach × the extent. mode 2: every other shape does.
+  shade(mode, ang, reach, upTo = this.L.n) {
+    if (!mode) return;
+    const L = this.L, E = L.e, P = L.pos, A = L.a, dx = Math.cos(ang), dy = Math.sin(ang);
+    let max = -1;
+    for (let i = 0; i < upTo; i++) if (E[i] > max) max = E[i];
+    if (max < 0) return;
+    const m = (max >> 1) + 1;
+    if (this.lo.length < m) { this.lo = new Float64Array(m * 2); this.hi = new Float64Array(m * 2); }
+    const lo = this.lo, hi = this.hi;
+    lo.fill(Infinity, 0, m); hi.fill(-Infinity, 0, m);
+    const on = (e) => e >= 0 && (mode === 1 || (e & 1) === 1);
+    for (let i = 0; i < upTo; i++) {
+      const e = E[i]; if (!on(e)) continue;
+      const k = e >> 1, p = P[i * 3] * dx + P[i * 3 + 1] * dy;
+      if (p < lo[k]) lo[k] = p; if (p > hi[k]) hi[k] = p;
+    }
+    const r = Math.max(0.05, reach);
+    for (let i = 0; i < upTo; i++) {
+      const e = E[i]; if (!on(e)) continue;
+      const k = e >> 1, span = hi[k] - lo[k];
+      if (span < 1e-6) continue;
+      const t = (P[i * 3] * dx + P[i * 3 + 1] * dy - lo[k]) / span;
+      A[i] *= Math.max(0, 1 - t / r);
+    }
   }
   // f(t, o) fills o.x, o.y, o.z, o.a for t in [0, 1]
   poly(n, f) {
@@ -184,6 +217,7 @@ export const CONCEPTS = {
         const thp = frac(t * 0.05 * g.sp + g.ph / TAU) * Math.PI * 1.6 - 0.2;
         const pulse = P.pulse * (0.25 + I);
         const segs = Math.max(48, Math.min(400, (r / 5) | 0));
+        pen.el(i);
         pen.poly(segs, (s, o) => {
           const th = s * ext;
           o.x = cx + r * Math.cos(th); o.y = cy + r * Math.sin(th); o.z = z;
@@ -226,6 +260,7 @@ export const CONCEPTS = {
         const a0 = sstep(0, 0.12, q) * (1 - sstep(0.82, 1, q)) * c.introAt(0.1 * (n - k) / n);
         if (a0 < 0.01) continue;
         const segs = Math.max(64, Math.min(360, (r / 4) | 0));
+        pen.el(k);
         pen.poly(segs, (s, o) => {
           const ph = s * TAU;
           const co = Math.cos(ph);
@@ -276,11 +311,13 @@ export const CONCEPTS = {
       });
       st.rays.forEach((r, i) => {
         const [ex, ey, ez] = ends[i];
+        pen.el(i);
         pen.poly(24, (s, o) => {
           o.x = lerp(fx, ex, s); o.y = lerp(fy, ey, s); o.z = ez * s;
           o.a = r.b * (0.3 + 0.7 * sstep(0, 0.06, s)) * (1 - sstep(0.4, 1, s));
         });
       });
+      pen.el(-1);
       if (P.vline > 0) {
         const up = 0.32 * H * P.vline * c.introAt(0.3), dn = 0.26 * H * P.vline * c.introAt(0.3);
         pen.poly(20, (s, o) => { o.x = fx; o.y = lerp(fy - dn, fy + up, s); const k = s < dn / (up + dn) ? 1 - s / (dn / (up + dn)) : (s - dn / (up + dn)) / (1 - dn / (up + dn)); o.a = 0.7 * Math.pow(1 - k, 1.6); });
@@ -367,12 +404,14 @@ export const CONCEPTS = {
         return { hubs };
       });
       const gi = c.introAt(0.1);
+      let eid = 0;
       st.clusters.forEach((cl, ci) => {
         const G = geo[ci];
         cl.hubs.forEach((hb, hi) => {
           const H0 = G.hubs[hi];
           hb.edges.forEach((e, ei) => {
             const [ex, ey, ez] = H0.ends[ei];
+            pen.el(eid++);
             pen.poly(16, (s, o) => {
               const w = s * gi;
               o.x = lerp(H0.x, ex, w); o.y = lerp(H0.y, ey, w); o.z = lerp(H0.z, ez, w);
@@ -386,10 +425,12 @@ export const CONCEPTS = {
           const f = sa.f + Math.sin(t * 0.18 + sa.ph) * 0.03 * dr;
           const x = lerp(H0.x, ex, f), y = lerp(H0.y, ey, f) + sa.off * H, z = lerp(H0.z, ez, f);
           const L = G.hubs[sa.link];
+          pen.el(eid++);
           pen.seg(x, y, z, 0.45 * gi, L.x, L.y, L.z, 0.6 * gi);
           pen.point(x, y, z, P.node * 0.45, 0.75 * c.introAt(0.4));
         });
       });
+      pen.el(-1);
       const vis = clamp(0.35 + I, 0, 1) * c.introAt(0.6);
       st.pulses.forEach((k) => {
         const H0 = geo[k.ci].hubs[k.hub], [ex, ey, ez] = H0.ends[k.edge];
@@ -452,6 +493,7 @@ export const CONCEPTS = {
           const base = (0.45 + 0.55 * sd) * (1 + 1.2 * k * P.lens * (0.3 + I)) * gi;
           const ph = sd;
           const af = (s) => base * (0.55 + 0.45 * Math.cos(TAU * (s - 0.3 - ph * 0.2)));
+          pen.el((j - j0) * (i1 - i0 + 1) + (i - i0), (i + j) & 1); // checkerboard when alternating
           if (shape === 0) pen.loop(rrectPts(tw, th, P.radius * u), cx, cy, z, 1, 1, af);
           else if (shape === 1) pen.loop(circlePts(48), cx, cy, z, tw, tw, af);
           else {
@@ -460,6 +502,7 @@ export const CONCEPTS = {
           }
         }
       }
+      pen.el(-1);
       if (P.rules > 0) {
         const ra = P.rules * 0.6 * gi;
         for (let i = i0; i <= i1; i++) {
@@ -519,6 +562,7 @@ export const CONCEPTS = {
         const th = b.line ? 0 : P.thick * u;
         const edgeA = (k2) => (s) => a * k2 * sstep(0, 0.03, s) * (0.3 + 0.7 * (1 - s));
         const top = edgeA(0.8), bot = edgeA(0.45);
+        pen.el(i);
         if (th <= 0.5) { // line-only bar
           pen.poly(20, (s, o) => { const [x, y] = map(x0 + L * s, yl); o.x = x; o.y = y; o.z = z; o.a = top(s); });
           return;
@@ -585,6 +629,7 @@ export const CONCEPTS = {
         const z0 = n > 1 ? (i / (n - 1) - 0.5) * P.depth * u : 0;
         const grow = c.introAt(0.15 * i);
         const segs = Math.max(120, Math.min(480, (hw / 6) | 0));
+        pen.el(i);
         for (const sg of sides) {
           // pulses travel left to right on one curve and right to left on its mirror
           const head = frac(t * 0.05 * P.flow * g.sp + g.ph / TAU + (sg < 0 ? 0.5 : 0));
@@ -604,6 +649,7 @@ export const CONCEPTS = {
 };
 
 // ---------- Config ----------
+const FILL = { solid: 0, gradient: 1, alternate: 2 };
 export const DEFAULTS = {
   v: 1,
   concept: 'orbit',
@@ -613,6 +659,10 @@ export const DEFAULTS = {
     // width: stroke width, 1 to 3. 1 = hairline (1 device pixel, the original look). Each step above 1 adds
     // that many px at a 900px-tall frame, scaling with the hero.
     width: 1,
+    // Stroke fill: 'solid', 'gradient' (each shape fades to clear across itself, like a Figma linear gradient stroke)
+    // or 'alternate' (every other shape). gradAngle: the direction it fades toward, 0 = right, 90 = up.
+    // gradReach: how far across the shape it reaches clear (1 = at the far edge).
+    fill: 'solid', gradAngle: 166, gradReach: 1,
     offsetX: -2, offsetY: 0, fade: 0, fadeAngle: 0, fadeFrom: 0, fadeTo: 0.7,
     vignette: 0, accent: '#ffffff', spot: 0.35, blend: 'normal',
     // Legibility band (Figma "gradient" layer): bg color fading in and out across a diagonal, over the art.
@@ -876,7 +926,9 @@ export function createHero(el, config = {}, options = {}) {
     for (const m of [frontMat, qFrontMat]) { m.uniforms.uColor.value.set(L.stroke); m.uniforms.uOpacity.value = L.opacity; }
     ptMat.uniforms.uColor.value.set(L.stroke); ptMat.uniforms.uOpacity.value = Math.min(1, L.opacity * 2.2);
     const wide = thick();
-    back.visible = !wide && L.backOpacity > 0.001; qBack.visible = wide && L.backOpacity > 0.001;
+    // The back stroke only draws with a solid fill; gradient shapes read as one clean line.
+    const backOn = L.backOpacity > 0.001 && (!L.fill || L.fill === 'solid');
+    back.visible = !wide && backOn; qBack.visible = wide && backOn;
     front.visible = !wide; qFront.visible = wide;
     const B = bandMat.uniforms, ba = (L.bandAngle || 0) * Math.PI / 180;
     B.uBg.value.set(L.bg); B.uAmt.value = L.band || 0; B.uW.value = L.bandWidth;
@@ -946,6 +998,8 @@ export function createHero(el, config = {}, options = {}) {
     pen.reset();
     concept.draw(ctx, pen, state, cfg.params);
     artN = pen.L.n;
+    pen.el(-1);
+    pen.shade(FILL[cfg.look.fill] || 0, (cfg.look.gradAngle || 0) * Math.PI / 180, cfg.look.gradReach ?? 1);
     if (cfg.grid.on) drawGrid(ctx, pen, cfg.grid);
     const wide = thick();
     if (pen.grewL) { bindL(); bindQ(); pen.grewL = false; }
