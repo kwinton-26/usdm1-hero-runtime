@@ -1,4 +1,4 @@
-// M1 Hero runtime v1.1.1
+// M1 Hero runtime v1.1.2
 // Renders USDM1 hairline hero art with WebGL. Shared by the generator and the Webflow embed.
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js';
 
@@ -609,14 +609,14 @@ export const DEFAULTS = {
   concept: 'orbit',
   seed: 7,
   look: {
-    bg: '#121316', stroke: '#ffffff', opacity: 0.4, back: '#636161', backOpacity: 0.5,
+    bg: '#121316', stroke: '#d5e3f6', opacity: 0.7, back: '#8dadd3', backOpacity: 0.5,
     // width: stroke width, 1 to 3. 1 = hairline (1 device pixel, the original look). Each step above 1 adds
     // that many px at a 900px-tall frame, scaling with the hero.
     width: 1,
     offsetX: -2, offsetY: 0, fade: 0, fadeAngle: 0, fadeFrom: 0, fadeTo: 0.7,
     vignette: 0, accent: '#ffffff', spot: 0.35, blend: 'normal',
     // Legibility band (Figma "gradient" layer): bg color fading in and out across a diagonal, over the art.
-    band: 0.5, bandAngle: 60, bandWidth: 2.2, bandX: 0.5, bandY: 0.5,
+    band: 0.8, bandAngle: 60, bandWidth: 2.2, bandX: 0.5, bandY: 0.5,
   },
   motion: { intensity: 0.35, speed: 1, intro: true },
   interact: { mouse: 1, glow: 0.6, glowRadius: 0.22, touch: true },
