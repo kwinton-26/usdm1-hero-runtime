@@ -1,4 +1,4 @@
-// M1 Hero runtime v1.1.0
+// M1 Hero runtime v1.1.1
 // Renders USDM1 hairline hero art with WebGL. Shared by the generator and the Webflow embed.
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js';
 
@@ -614,7 +614,7 @@ export const DEFAULTS = {
     // that many px at a 900px-tall frame, scaling with the hero.
     width: 1,
     offsetX: -2, offsetY: 0, fade: 0, fadeAngle: 0, fadeFrom: 0, fadeTo: 0.7,
-    vignette: 0.3, accent: '#ffffff', spot: 0.35, blend: 'normal',
+    vignette: 0, accent: '#ffffff', spot: 0.35, blend: 'normal',
     // Legibility band (Figma "gradient" layer): bg color fading in and out across a diagonal, over the art.
     band: 0.5, bandAngle: 60, bandWidth: 2.2, bandX: 0.5, bandY: 0.5,
   },
@@ -632,8 +632,11 @@ export const DEFAULTS = {
 export const PORTRAIT_SECTIONS = ['params', 'look', 'motion', 'interact', 'camera', 'grid'];
 
 const isObj = (o) => o && typeof o === 'object' && !Array.isArray(o);
+// Deep: nested objects from a are copied too, so a merged config never shares objects with DEFAULTS
+// (editing one would otherwise edit the defaults).
 function merge(a, b) {
   const out = Array.isArray(a) ? a.slice() : { ...a };
+  for (const k of Object.keys(out)) if (isObj(out[k])) out[k] = merge(out[k]);
   if (!isObj(b)) return out;
   for (const k of Object.keys(b)) out[k] = isObj(a?.[k]) && isObj(b[k]) ? merge(a[k], b[k]) : b[k];
   return out;
@@ -670,6 +673,8 @@ export function normalize(cfg = {}) {
   }
   // Stroke width runs 1 (hairline) to 3; early drafts used 0 for the hairline.
   for (const c of [out, out.portrait]) if (c) c.look.width = Math.min(3, Math.max(1, +c.look.width || 1));
+  // The vignette is retired: always off, even for configs saved with one.
+  for (const c of [out, out.portrait]) if (c) c.look.vignette = 0;
   return out;
 }
 // Effective settings for one orientation.
