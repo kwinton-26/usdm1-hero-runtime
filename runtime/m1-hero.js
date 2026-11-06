@@ -1,4 +1,4 @@
-// M1 Hero runtime v1.0.0
+// M1 Hero runtime v1.1.0
 // Renders USDM1 hairline hero art with WebGL. Shared by the generator and the Webflow embed.
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.min.js';
 
@@ -24,26 +24,42 @@ function makeRng(seed) {
 // Pen: collects line segments and points for one frame
 class Pen {
   constructor() {
-    this.L = { pos: new Float32Array(3 * 16384), a: new Float32Array(16384), n: 0 };
+    // nb: each vertex's neighbor along its path (previous point for a segment start, next point for its end),
+    // or the vertex itself at a free end. Wide strokes use it to miter the joins. c0: first vertex of the current path.
+    this.L = { pos: new Float32Array(3 * 16384), a: new Float32Array(16384), nb: new Float32Array(3 * 16384), n: 0, c0: 0 };
     this.P = { pos: new Float32Array(3 * 1024), a: new Float32Array(1024), s: new Float32Array(1024), n: 0 };
     this.o = { x: 0, y: 0, z: 0, a: 1 };
     this.grewL = this.grewP = false;
   }
-  reset() { this.L.n = 0; this.P.n = 0; }
+  reset() { this.L.n = 0; this.L.c0 = 0; this.P.n = 0; }
   _growL(k) {
     const L = this.L;
     if (L.n + k <= L.a.length) return;
     const c = Math.max(L.a.length * 2, L.n + k);
     const p = new Float32Array(c * 3); p.set(L.pos); L.pos = p;
     const a = new Float32Array(c); a.set(L.a); L.a = a;
+    const nb = new Float32Array(c * 3); nb.set(L.nb); L.nb = nb;
     this.grewL = true;
   }
   seg(x1, y1, z1, a1, x2, y2, z2, a2) {
     if (a1 < 0.003 && a2 < 0.003) return;
     this._growL(2);
-    const L = this.L, i = L.n * 3;
-    L.pos[i] = x1; L.pos[i + 1] = y1; L.pos[i + 2] = z1;
-    L.pos[i + 3] = x2; L.pos[i + 4] = y2; L.pos[i + 5] = z2;
+    const L = this.L, i = L.n * 3, P = L.pos, N = L.nb;
+    const f = Math.fround; // positions are stored as float32, so compare at that precision
+    if (f(x1) === f(x2) && f(y1) === f(y2) && f(z1) === f(z2)) return; // zero length: nothing to draw, and it would break the join
+    const joined = L.n > 0 && P[i - 3] === f(x1) && P[i - 2] === f(y1) && P[i - 1] === f(z1);
+    P[i] = x1; P[i + 1] = y1; P[i + 2] = z1;
+    P[i + 3] = x2; P[i + 4] = y2; P[i + 5] = z2;
+    if (joined) { // link both ways: this start sees the previous start, the previous end sees this end
+      N[i] = P[i - 6]; N[i + 1] = P[i - 5]; N[i + 2] = P[i - 4];
+      N[i - 3] = x2; N[i - 2] = y2; N[i - 1] = z2;
+    } else { N[i] = x1; N[i + 1] = y1; N[i + 2] = z1; L.c0 = L.n; }
+    N[i + 3] = x2; N[i + 4] = y2; N[i + 5] = z2;
+    const c = L.c0 * 3;
+    if (L.c0 < L.n && P[c] === f(x2) && P[c + 1] === f(y2) && P[c + 2] === f(z2)) { // path closes on its first point
+      N[i + 3] = P[c + 3]; N[i + 4] = P[c + 4]; N[i + 5] = P[c + 5];
+      N[c] = x1; N[c + 1] = y1; N[c + 2] = z1;
+    }
     L.a[L.n] = a1; L.a[L.n + 1] = a2; L.n += 2;
   }
   // f(t, o) fills o.x, o.y, o.z, o.a for t in [0, 1]
@@ -183,7 +199,7 @@ export const CONCEPTS = {
   tunnel: {
     label: 'Depth Tunnel',
     family: 'RMI',
-    blurb: 'The nested ellipses become a true 3D tunnel that streams forward. Rings turn to face the cursor and scroll pushes the flow.',
+    blurb: 'The nested ellipses become a true 3D tunnel that streams forward. Rings turn to face the cursor.',
     layout: { wide: { x: -0.01, y: 0.5, s: 1 }, tall: { x: -0.05, y: 0.42, s: 0.85 } },
     params: {
       count: p(7, 3, 24, 1, 'Rings'),
@@ -198,7 +214,7 @@ export const CONCEPTS = {
     init(c, P, rnd) { return { ph: rnd() }; },
     draw(c, pen, st, P) {
       const { u, t, I, W, H } = c, n = Math.round(P.count);
-      const flow = t * 0.04 * P.flow + c.scroll * 0.6 + st.ph;
+      const flow = t * 0.04 * P.flow + st.ph;
       const sq = clamp(P.squash + c.mn.x * c.md * 0.22 * (0.3 + I) * c.mouseAmt, 0.03, 1);
       const cz = Math.sqrt(1 - sq * sq);
       const cy = c.ay + c.mn.y * c.md * 0.05 * H * I * c.mouseAmt;
@@ -469,6 +485,7 @@ export const CONCEPTS = {
       orient: p(0, 0, 1, 1, 'Orientation', { options: { Horizontal: 0, Vertical: 1 } }),
       pitch: p(64, 10, 200, 1, 'Pitch'),
       thick: p(40, 0, 160, 1, 'Thickness'),
+      radius: p(0, 0, 80, 1, 'Corner radius'),
       len: p(1000, 100, 2400, 5, 'Length'),
       lenVar: p(0, 0, 1, 0.01, 'Length variance'),
       slant: p(100, -300, 300, 1, 'Slant'),
@@ -500,18 +517,33 @@ export const CONCEPTS = {
         const glow = 1 + P.highlight * (0.3 + I) * 1.6 * gauss((i - hi) / 1.3);
         const a = b.b * glow;
         const th = b.line ? 0 : P.thick * u;
-        const edge = (dy, k2) => pen.poly(20, (s, o) => {
-          const [x, y] = map(x0 + L * s, yl + dy);
-          o.x = x; o.y = y; o.z = z;
-          o.a = a * k2 * sstep(0, 0.03, s) * (0.3 + 0.7 * (1 - s));
-        });
-        edge(th / 2, 0.8);
-        if (th > 0.5) {
-          edge(-th / 2, 0.45);
-          const [ax1, ay1] = map(x0, yl - th / 2), [ax2, ay2] = map(x0, yl + th / 2);
-          pen.seg(ax1, ay1, z, a * 0.5, ax2, ay2, z, a * 0.7);
-          const [bx1, by1] = map(x0 + L, yl - th / 2), [bx2, by2] = map(x0 + L, yl + th / 2);
-          pen.seg(bx1, by1, z, a * 0.15, bx2, by2, z, a * 0.2);
+        const edgeA = (k2) => (s) => a * k2 * sstep(0, 0.03, s) * (0.3 + 0.7 * (1 - s));
+        const top = edgeA(0.8), bot = edgeA(0.45);
+        if (th <= 0.5) { // line-only bar
+          pen.poly(20, (s, o) => { const [x, y] = map(x0 + L * s, yl); o.x = x; o.y = y; o.z = z; o.a = top(s); });
+          return;
+        }
+        // Outline bar: one closed path (top edge, end cap, bottom edge, start cap) with optional rounded corners.
+        const R = Math.min((P.radius || 0) * u, th / 2, L / 2), r0 = R / L, steps = R > 0.5 ? 6 : 0;
+        const xs = x0, xe = x0 + L, yT = yl + th / 2, yB = yl - th / 2;
+        const pts = [];
+        const arc = (cx, cy, a0, a1, al0, al1) => {
+          for (let j = 1; j <= steps; j++) { const f = j / steps, an = a0 + (a1 - a0) * f; pts.push(cx + Math.cos(an) * R, cy + Math.sin(an) * R, lerp(al0, al1, f)); }
+        };
+        for (let j = 0; j <= 20; j++) { const s = lerp(r0, 1 - r0, j / 20); pts.push(xs + L * s, yT, top(s)); }
+        arc(xe - R, yT - R, Math.PI / 2, 0, top(1 - r0), a * 0.2);
+        pts.push(xe, yT - R, a * 0.2, xe, yB + R, a * 0.15);
+        arc(xe - R, yB + R, 0, -Math.PI / 2, a * 0.15, bot(1 - r0));
+        for (let j = 0; j <= 20; j++) { const s = lerp(1 - r0, r0, j / 20); pts.push(xs + L * s, yB, bot(s)); }
+        arc(xs + R, yB + R, -Math.PI / 2, -Math.PI, bot(r0), a * 0.5);
+        pts.push(xs, yB + R, a * 0.5, xs, yT - R, a * 0.7);
+        arc(xs + R, yT - R, Math.PI, Math.PI / 2, a * 0.7, top(r0));
+        let [px, py] = map(pts[0], pts[1]), pa = pts[2];
+        for (let j = 3; j < pts.length; j += 3) {
+          const [x, y] = map(pts[j], pts[j + 1]);
+          if (Math.abs(x - px) + Math.abs(y - py) < 1e-3) { pa = pts[j + 2]; continue; } // fully rounded ends leave zero-length caps
+          pen.seg(px, py, z, pa, x, y, z, pts[j + 2]);
+          px = x; py = y; pa = pts[j + 2];
         }
       });
     },
@@ -544,12 +576,12 @@ export const CONCEPTS = {
       const { u, t, I } = c, n = st.lines.length;
       const lean = c.md * c.mouseAmt * (0.3 + I);
       const cx = c.ax + (c.mx - c.ax) * 0.08 * lean, cy = c.ay + (c.my - c.ay) * 0.12 * lean;
-      const flat = 1 - 0.35 * c.scroll, reach = P.reach * Math.PI / 180;
+      const reach = P.reach * Math.PI / 180;
       const sides = Math.round(P.mirror) ? [1, -1] : [1];
       st.lines.forEach((g, i) => {
         const k = Math.max(0.05, 1 - i * P.step);
         const hw = P.width * u * k / 2;
-        const A = P.height * u * k / 2 * flat * (1 + 0.05 * P.breathe * (0.3 + I) * Math.sin(t * 0.4 * g.sp + g.ph));
+        const A = P.height * u * k / 2 * (1 + 0.05 * P.breathe * (0.3 + I) * Math.sin(t * 0.4 * g.sp + g.ph));
         const z0 = n > 1 ? (i / (n - 1) - 0.5) * P.depth * u : 0;
         const grow = c.introAt(0.15 * i);
         const segs = Math.max(120, Math.min(480, (hw / 6) | 0));
@@ -578,13 +610,16 @@ export const DEFAULTS = {
   seed: 7,
   look: {
     bg: '#121316', stroke: '#ffffff', opacity: 0.4, back: '#636161', backOpacity: 0.5,
+    // width: stroke width, 1 to 3. 1 = hairline (1 device pixel, the original look). Each step above 1 adds
+    // that many px at a 900px-tall frame, scaling with the hero.
+    width: 1,
     offsetX: -2, offsetY: 0, fade: 0, fadeAngle: 0, fadeFrom: 0, fadeTo: 0.7,
     vignette: 0.3, accent: '#ffffff', spot: 0.35, blend: 'normal',
     // Legibility band (Figma "gradient" layer): bg color fading in and out across a diagonal, over the art.
     band: 0.5, bandAngle: 60, bandWidth: 2.2, bandX: 0.5, bandY: 0.5,
   },
   motion: { intensity: 0.35, speed: 1, intro: true },
-  interact: { mouse: 1, glow: 0.6, glowRadius: 0.22, scroll: 0.5, touch: true },
+  interact: { mouse: 1, glow: 0.6, glowRadius: 0.22, touch: true },
   camera: { fov: 30, tilt: 0, orbit: 0 },
   // Texture layers shared by every concept: hairline grid and film grain.
   grid: { on: false, strength: 0.35, step: 40, depth: 160, fx: 0.5, fy: 0.5, focus: 1, grainOn: true, grain: 0.03 },
@@ -633,6 +668,8 @@ export function normalize(cfg = {}) {
     delete out.portrait.params.grid; delete out.portrait.params.gridStep; delete out.portrait.look.grain;
     if (oldGrain(cfg.portrait) != null) out.portrait.grid.grain = oldGrain(cfg.portrait);
   }
+  // Stroke width runs 1 (hairline) to 3; early drafts used 0 for the hairline.
+  for (const c of [out, out.portrait]) if (c) c.look.width = Math.min(3, Math.max(1, +c.look.width || 1));
   return out;
 }
 // Effective settings for one orientation.
@@ -660,6 +697,29 @@ vec4 shade(float a){
 const LINE_VS = /* glsl */`
 attribute float aA; varying float vA; uniform vec2 uOffset; uniform vec2 uRes;
 void main(){ vec4 p = projectionMatrix * modelViewMatrix * vec4(position, 1.0); p.xy += uOffset * 2.0 / uRes * p.w; gl_Position = p; vA = aA; }`;
+// Wider strokes: each segment is a quad expanded in screen space. position.x picks the end (0 start, 1 end),
+// position.y the side. Below 1 device pixel the quad stays 1px wide and fades instead, so thin widths stay smooth.
+const QLINE_VS = /* glsl */`
+attribute vec3 iA; attribute vec3 iB; attribute vec3 iP; attribute vec3 iN; attribute float iAA; attribute float iAB;
+uniform vec2 uOffset; uniform vec2 uRes; uniform float uWidth; varying float vA;
+vec2 scr(vec3 q){ vec4 c = projectionMatrix * modelViewMatrix * vec4(q, 1.0); return c.xy / c.w * uRes * 0.5; }
+vec2 nrm(vec2 d){ float l = length(d); return l > 1e-4 ? vec2(-d.y, d.x) / l : vec2(0.0); }
+void main(){
+  bool st = position.x < 0.5;
+  vec4 p = projectionMatrix * modelViewMatrix * vec4(st ? iA : iB, 1.0);
+  vec2 sa = scr(iA), sb = scr(iB);
+  vec2 n = nrm(sb - sa); if (dot(n, n) < 0.5) n = vec2(0.0, 1.0);
+  vec2 n2 = nrm(st ? sa - scr(iP) : scr(iN) - sb); // the neighboring segment, in drawing order
+  float hw = 0.5 * max(uWidth, 1.0);
+  vec2 off = n * position.y * hw;
+  if (dot(n2, n2) > 0.5) { // joined: miter so neighbors meet exactly, with no gap or overlap (limit 4x, else butt)
+    vec2 m = normalize(n + n2); float k = dot(m, n);
+    if (k > 0.25) off = m * position.y * hw / k;
+  }
+  p.xy += (off + uOffset) * 2.0 / uRes * p.w;
+  gl_Position = p;
+  vA = (st ? iAA : iAB) * min(uWidth, 1.0);
+}`;
 const LINE_FS = COMMON + `varying float vA; void main(){ gl_FragColor = shade(vA); }`;
 const PT_VS = /* glsl */`
 attribute float aA; attribute float aS; varying float vA; varying float vSoft; uniform float uDpr;
@@ -693,14 +753,15 @@ void main(){
   gl_FragColor = vec4(c, 1.0);
 }`;
 
-function lineMat(blend) {
+function lineMat(blend, vs = LINE_VS) {
   return new THREE.ShaderMaterial({
-    vertexShader: LINE_VS, fragmentShader: LINE_FS, transparent: true, depthTest: false, depthWrite: false,
+    vertexShader: vs, fragmentShader: LINE_FS, transparent: true, depthTest: false, depthWrite: false,
     blending: blend === 'add' ? THREE.AdditiveBlending : THREE.NormalBlending,
     uniforms: {
       uRes: { value: new THREE.Vector2() }, uMouse: { value: new THREE.Vector2(-1e4, -1e4) }, uOffset: { value: new THREE.Vector2() },
       uGlow: { value: 0 }, uGlowR: { value: 0.2 }, uFade: { value: 0 }, uFadeFrom: { value: 0 }, uFadeTo: { value: 1 }, uFadeDir: { value: new THREE.Vector2(1, 0) },
       uVig: { value: 0 }, uIntro: { value: 1 }, uColor: { value: new THREE.Color() }, uAccent: { value: new THREE.Color() }, uOpacity: { value: 1 },
+      uWidth: { value: 1 },
     },
   });
 }
@@ -718,13 +779,14 @@ export function createHero(el, config = {}, options = {}) {
   canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;';
   let renderer;
   try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'high-performance' });
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   } catch (e) {
     if (cfg.poster) { el.style.backgroundImage = `url("${cfg.poster}")`; el.style.backgroundSize = 'cover'; el.style.backgroundPosition = 'center'; }
     return { fallback: true, setConfig() {}, destroy() {}, snapshot: async () => null, resize() {}, replay() {}, getConfig: () => cfg, canvas: null };
   }
   el.appendChild(canvas);
   renderer.autoClear = false;
+  renderer.setClearColor(0x000000, 0); // the background pass paints every pixel opaque; transparent stills skip it
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 
   const scene = new THREE.Scene(), root = new THREE.Group(); scene.add(root);
@@ -758,12 +820,32 @@ export function createHero(el, config = {}, options = {}) {
   const back = new THREE.LineSegments(lGeo, backMat), front = new THREE.LineSegments(lGeo, frontMat);
   const ptMat = new THREE.ShaderMaterial({ vertexShader: PT_VS, fragmentShader: PT_FS, transparent: true, depthTest: false, depthWrite: false, uniforms: { ...THREE.UniformsUtils.clone(frontMat.uniforms), uDpr: { value: 1 } } });
   const points = new THREE.Points(pGeo, ptMat);
-  [back, front, points].forEach((o, i) => { o.frustumCulled = false; o.renderOrder = i; root.add(o); });
+  // Stroke width above a hairline: the same segments drawn as instanced quads (WebGL lines are always 1 device pixel).
+  const qGeo = new THREE.InstancedBufferGeometry();
+  qGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, -1, 0, 0, 1, 0, 1, -1, 0, 1, 1, 0], 3));
+  qGeo.setIndex([0, 2, 1, 1, 2, 3]);
+  let qPos = null, qA = null, qN = null;
+  const bindQ = () => {
+    qPos = new THREE.InstancedInterleavedBuffer(pen.L.pos, 6).setUsage(THREE.DynamicDrawUsage);
+    qA = new THREE.InstancedInterleavedBuffer(pen.L.a, 2).setUsage(THREE.DynamicDrawUsage);
+    qGeo.setAttribute('iA', new THREE.InterleavedBufferAttribute(qPos, 3, 0));
+    qGeo.setAttribute('iB', new THREE.InterleavedBufferAttribute(qPos, 3, 3));
+    qGeo.setAttribute('iAA', new THREE.InterleavedBufferAttribute(qA, 1, 0));
+    qGeo.setAttribute('iAB', new THREE.InterleavedBufferAttribute(qA, 1, 1));
+    qN = new THREE.InstancedInterleavedBuffer(pen.L.nb, 6).setUsage(THREE.DynamicDrawUsage);
+    qGeo.setAttribute('iP', new THREE.InterleavedBufferAttribute(qN, 3, 0));
+    qGeo.setAttribute('iN', new THREE.InterleavedBufferAttribute(qN, 3, 3));
+  };
+  bindQ();
+  const qBackMat = lineMat(cfg.look.blend, QLINE_VS), qFrontMat = lineMat(cfg.look.blend, QLINE_VS);
+  const qBack = new THREE.Mesh(qGeo, qBackMat), qFront = new THREE.Mesh(qGeo, qFrontMat);
+  const allMats = [backMat, frontMat, qBackMat, qFrontMat, ptMat];
+  [[back, 0], [qBack, 0], [front, 1], [qFront, 1], [points, 2]].forEach(([o, i]) => { o.frustumCulled = false; o.renderOrder = i; root.add(o); });
+  const thick = () => (cfg.look.width || 1) > 1;
 
   let W = 1, H = 1, dpr = 1, state = null, concept = null, settled = false, artN = 0;
   let t = 0, last = performance.now(), born = last, running = false, raf = 0, visible = true, destroyed = false;
   const mouse = { tx: 0, ty: 0, x: 0, y: 0, tin: 0, in: 0 };
-  let scrollP = 0, scrollT = 0;
   const reduceMQ = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : null;
   const reduced = () => opt.reducedMotion === 'force' || (opt.reducedMotion === 'auto' && reduceMQ && reduceMQ.matches);
 
@@ -775,20 +857,22 @@ export function createHero(el, config = {}, options = {}) {
     const L = cfg.look;
     el.style.backgroundColor = L.bg;
     const blend = L.blend === 'add' ? THREE.AdditiveBlending : THREE.NormalBlending;
-    for (const m of [backMat, frontMat, ptMat]) m.blending = blend;
+    for (const m of allMats) m.blending = blend;
     bgMat.uniforms.uBg.value.set(L.bg); bgMat.uniforms.uAccent.value.set(L.accent);
     bgMat.uniforms.uSpot.value = L.spot; bgMat.uniforms.uGrain.value = cfg.grid.grainOn ? cfg.grid.grain : 0; bgMat.uniforms.uVig.value = L.vignette;
     const ang = L.fadeAngle * Math.PI / 180;
-    for (const m of [backMat, frontMat, ptMat]) {
+    for (const m of allMats) {
       const U = m.uniforms;
       U.uFade.value = L.fade; U.uFadeFrom.value = L.fadeFrom; U.uFadeTo.value = Math.max(L.fadeTo, L.fadeFrom + 0.001);
       U.uFadeDir.value.set(Math.cos(ang), Math.sin(ang)); U.uVig.value = L.vignette; U.uAccent.value.set(L.accent);
       U.uGlowR.value = cfg.interact.glowRadius;
     }
-    backMat.uniforms.uColor.value.set(L.back); backMat.uniforms.uOpacity.value = L.backOpacity;
-    frontMat.uniforms.uColor.value.set(L.stroke); frontMat.uniforms.uOpacity.value = L.opacity;
+    for (const m of [backMat, qBackMat]) { m.uniforms.uColor.value.set(L.back); m.uniforms.uOpacity.value = L.backOpacity; }
+    for (const m of [frontMat, qFrontMat]) { m.uniforms.uColor.value.set(L.stroke); m.uniforms.uOpacity.value = L.opacity; }
     ptMat.uniforms.uColor.value.set(L.stroke); ptMat.uniforms.uOpacity.value = Math.min(1, L.opacity * 2.2);
-    back.visible = L.backOpacity > 0.001;
+    const wide = thick();
+    back.visible = !wide && L.backOpacity > 0.001; qBack.visible = wide && L.backOpacity > 0.001;
+    front.visible = !wide; qFront.visible = wide;
     const B = bandMat.uniforms, ba = (L.bandAngle || 0) * Math.PI / 180;
     B.uBg.value.set(L.bg); B.uAmt.value = L.band || 0; B.uW.value = L.bandWidth;
     B.uC.value.set(L.bandX, 1 - L.bandY); B.uN.value.set(-Math.sin(ba), Math.cos(ba));
@@ -812,6 +896,29 @@ export function createHero(el, config = {}, options = {}) {
     if (!running) renderFrame();
   }
 
+  // Transparent stills: skip the background pass, keep alpha correct for additive strokes,
+  // and let the legibility band erase the lines instead of painting slate over them.
+  let clearBg = false;
+  function see(on) {
+    clearBg = on;
+    for (const m of allMats) {
+      if (on && cfg.look.blend === 'add') {
+        m.blending = THREE.CustomBlending;
+        m.blendSrc = THREE.SrcAlphaFactor; m.blendDst = THREE.OneFactor;
+        m.blendSrcAlpha = THREE.OneFactor; m.blendDstAlpha = THREE.OneFactor;
+      }
+      m.needsUpdate = true;
+    }
+    if (on) {
+      bandMat.blending = THREE.CustomBlending;
+      bandMat.blendSrc = THREE.ZeroFactor; bandMat.blendDst = THREE.OneMinusSrcAlphaFactor;
+      bandMat.blendSrcAlpha = THREE.ZeroFactor; bandMat.blendDstAlpha = THREE.OneMinusSrcAlphaFactor;
+    } else {
+      bandMat.blending = THREE.NormalBlending;
+      applyLook();
+    }
+    bandMat.needsUpdate = true;
+  }
   function renderFrame() {
     const I = cfg.motion.intensity;
     const elapsed = settled || reduced() || !cfg.motion.intro ? 99 : (performance.now() - born) / 1000;
@@ -819,24 +926,27 @@ export function createHero(el, config = {}, options = {}) {
     const fov = cfg.camera.fov;
     const D = (H / 2) / Math.tan((fov * Math.PI / 180) / 2);
     camera.fov = fov; camera.near = Math.max(1, D * 0.02); camera.far = D * 6;
-    const sAmt = cfg.interact.scroll;
-    camera.position.set(0, 0, D * (1 - 0.12 * scrollP * sAmt)); camera.lookAt(0, 0, 0); camera.updateProjectionMatrix();
+    camera.position.set(0, 0, D); camera.lookAt(0, 0, 0); camera.updateProjectionMatrix();
     const mouseAmt = opt.interactive ? cfg.interact.mouse : 0;
     const md = mouse.in;
     const mnx = clamp(mouse.x / (W / 2), -1, 1), mny = clamp(mouse.y / (H / 2), -1, 1);
     const tilt = mouseAmt * (0.03 + 0.2 * I);
-    root.rotation.x = cfg.camera.tilt * Math.PI / 180 - mny * md * tilt + scrollP * sAmt * 0.15;
+    root.rotation.x = cfg.camera.tilt * Math.PI / 180 - mny * md * tilt;
     root.rotation.y = cfg.camera.orbit * Math.PI / 180 + mnx * md * tilt;
     const lay = W / H < 1 ? cfg.layout.tall : cfg.layout.wide;
     const ctx = {
       W, H, D, t, I, u: (H / 900) * lay.s, ax: (lay.x - 0.5) * W, ay: (0.5 - lay.y) * H,
-      mx: mouse.x, my: mouse.y, md, mn: { x: mnx, y: mny }, mouseAmt, scroll: scrollP * sAmt, introAt,
+      mx: mouse.x, my: mouse.y, md, mn: { x: mnx, y: mny }, mouseAmt, introAt,
     };
     pen.reset();
     concept.draw(ctx, pen, state, cfg.params);
     artN = pen.L.n;
     if (cfg.grid.on) drawGrid(ctx, pen, cfg.grid);
-    if (pen.grewL) { bindL(); pen.grewL = false; } else { lGeo.attributes.position.needsUpdate = true; lGeo.attributes.aA.needsUpdate = true; }
+    const wide = thick();
+    if (pen.grewL) { bindL(); bindQ(); pen.grewL = false; }
+    else if (wide) { qPos.needsUpdate = true; qA.needsUpdate = true; qN.needsUpdate = true; }
+    else { lGeo.attributes.position.needsUpdate = true; lGeo.attributes.aA.needsUpdate = true; }
+    qGeo.instanceCount = pen.L.n / 2;
     if (pen.grewP) { bindP(); pen.grewP = false; } else { pGeo.attributes.position.needsUpdate = true; pGeo.attributes.aA.needsUpdate = true; pGeo.attributes.aS.needsUpdate = true; }
     lGeo.setDrawRange(0, pen.L.n); pGeo.setDrawRange(0, pen.P.n);
 
@@ -844,16 +954,17 @@ export function createHero(el, config = {}, options = {}) {
     const mxp = (mouse.x + W / 2) * dpr, myp = (mouse.y + H / 2) * dpr;
     const glow = cfg.interact.glow * md * (0.5 + I) * (opt.interactive ? 1 : 0);
     const introA = ease(elapsed / 1.2);
-    for (const m of [backMat, frontMat, ptMat]) {
+    for (const m of allMats) {
       const U = m.uniforms;
       U.uRes.value.set(bw, bh); U.uMouse.value.set(mxp, myp); U.uGlow.value = glow; U.uIntro.value = introA;
     }
-    backMat.uniforms.uOffset.value.set(cfg.look.offsetX * dpr, cfg.look.offsetY * dpr);
+    for (const m of [backMat, qBackMat]) m.uniforms.uOffset.value.set(cfg.look.offsetX * dpr, cfg.look.offsetY * dpr);
+    qBackMat.uniforms.uWidth.value = qFrontMat.uniforms.uWidth.value = 1 + Math.max(0, (cfg.look.width || 1) - 1) * (H / 900) * dpr;
     ptMat.uniforms.uDpr.value = dpr;
     bgMat.uniforms.uRes.value.set(bw, bh); bgMat.uniforms.uMouse.value.set(mxp, myp); bgMat.uniforms.uTime.value = t;
     bgMat.uniforms.uSpot.value = cfg.look.spot * md * (opt.interactive ? 1 : 0);
     renderer.clear();
-    renderer.render(bgScene, bgCam);
+    if (!clearBg) renderer.render(bgScene, bgCam);
     renderer.render(scene, camera);
     if (cfg.look.band > 0.001) { bandMat.uniforms.uRes.value.set(bw, bh); renderer.render(bandScene, bgCam); }
   }
@@ -865,7 +976,6 @@ export function createHero(el, config = {}, options = {}) {
     if (!reduced()) t += dt * cfg.motion.speed;
     const k = 1 - Math.exp(-dt * 3.5);
     mouse.x += (mouse.tx - mouse.x) * k; mouse.y += (mouse.ty - mouse.y) * k; mouse.in += (mouse.tin - mouse.in) * (1 - Math.exp(-dt * 2.5));
-    scrollP += (scrollT - scrollP) * (1 - Math.exp(-dt * 5));
     renderFrame();
   }
   function start() { if (running || destroyed) return; running = true; last = performance.now(); raf = requestAnimationFrame(tick); }
@@ -883,13 +993,8 @@ export function createHero(el, config = {}, options = {}) {
     if (!running) renderFrame();
   }
   function onLeave() { mouse.tin = 0; }
-  function onScroll() {
-    const r = el.getBoundingClientRect();
-    scrollT = clamp(-r.top / Math.max(1, r.height), 0, 1);
-  }
   window.addEventListener('pointermove', onPointer, { passive: true });
   document.documentElement.addEventListener('pointerleave', onLeave);
-  window.addEventListener('scroll', onScroll, { passive: true });
   reduceMQ && reduceMQ.addEventListener && reduceMQ.addEventListener('change', sync);
   const ro = new ResizeObserver(() => resize()); ro.observe(el);
   let io = null;
@@ -898,7 +1003,7 @@ export function createHero(el, config = {}, options = {}) {
     io.observe(el);
   }
 
-  rebuild(); applyLook(); resize(); onScroll(); sync();
+  rebuild(); applyLook(); resize(); sync();
 
   return {
     canvas,
@@ -939,11 +1044,18 @@ export function createHero(el, config = {}, options = {}) {
     },
     setPaused(b) { if (b) { visible = false; } else { visible = true; } sync(); },
     resize,
-    async snapshot({ width, height, scale = 1 } = {}) {
+    // clean: true leaves out the grid and grain for this still only.
+    // transparent: true leaves out the background color, so only the lines remain on a transparent PNG.
+    async snapshot({ width, height, scale = 1, clean = false, transparent = false } = {}) {
       const prev = [W, H, dpr];
       setSize(width || W, height || H, scale);
+      const G = cfg.grid, keep = [G.on, G.grainOn];
+      if (clean) { G.on = false; G.grainOn = false; applyLook(); }
+      if (transparent) see(true);
       renderFrame();
       const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+      if (transparent) see(false);
+      if (clean) { [G.on, G.grainOn] = keep; applyLook(); }
       setSize(...prev); renderFrame();
       return blob;
     },
@@ -951,10 +1063,9 @@ export function createHero(el, config = {}, options = {}) {
       destroyed = true; stop();
       window.removeEventListener('pointermove', onPointer);
       document.documentElement.removeEventListener('pointerleave', onLeave);
-      window.removeEventListener('scroll', onScroll);
       reduceMQ && reduceMQ.removeEventListener && reduceMQ.removeEventListener('change', sync);
       ro.disconnect(); io && io.disconnect();
-      lGeo.dispose(); pGeo.dispose(); backMat.dispose(); frontMat.dispose(); ptMat.dispose(); bgMat.dispose(); bandMat.dispose();
+      lGeo.dispose(); pGeo.dispose(); qGeo.dispose(); allMats.forEach((m) => m.dispose()); bgMat.dispose(); bandMat.dispose();
       renderer.dispose(); renderer.forceContextLoss(); canvas.remove();
     },
   };
